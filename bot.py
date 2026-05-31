@@ -650,29 +650,46 @@ def _accounts_for_coin(rows, coin_key: str):
     return out
 
 
+def _window_start(points, gap_sec: int):
+    """points — срезы (captured_at, mined) новыми вперёд. Возвращает самый ранний
+    срез текущего непрерывного захода (до первого разрыва > gap_sec)."""
+    if not points:
+        return None
+    start = points[0]
+    for nxt in points[1:]:
+        if start["captured_at"] - nxt["captured_at"] > gap_sec:
+            break
+        start = nxt
+    return start
+
+
+def _hhmm(ts: float) -> str:
+    off = getattr(config, "DAY_TZ_OFFSET_HOURS", 0) * 3600
+    return time.strftime("%H:%M", time.gmtime(ts + off))
+
+
 async def build_earnings_view(tg_id: int, coin_key: str, level: str):
     c = coins.get(coin_key)
     if c is None:
         return "Монета не найдена.", keyboards.back_to("home")
 
-    day_start = _day_start_ts()
     now = time.time()
     usd = await prices.get_price(c)
 
-    # доход за сегодня (с пул-стороны) + пометка неполного дня
+    # доход за текущее окно (с последнего запуска/перерыва), по разрывам в срезах
+    poll = getattr(config, "POLL_MINUTES", 10)
+    gap = max(poll * 3, 20) * 60
     rows = await db.list_accounts(tg_id)
-    mined_today, first_ts, partial = 0.0, None, False
+    mined_window, win_ts = 0.0, None
     for a in _accounts_for_coin(rows, coin_key):
         latest = await db.latest_snapshot(tg_id, a["id"])
-        first = await db.first_snapshot_today(tg_id, a["id"], day_start)
-        if latest and first and latest["mined"] >= first["mined"]:
-            mined_today += latest["mined"] - first["mined"]
-            ft = first["captured_at"]
-            first_ts = ft if first_ts is None else min(first_ts, ft)
-            if ft > day_start + 1800:   # первый срез позже чем +30 мин от полуночи
-                partial = True
+        start = _window_start(await db.recent_points(tg_id, a["id"]), gap)
+        if latest and start and latest["mined"] >= start["mined"]:
+            mined_window += latest["mined"] - start["mined"]
+            win_ts = start["captured_at"] if win_ts is None else min(win_ts, start["captured_at"])
 
-    hours = ((now - first_ts) / 3600.0) if first_ts else 0.0
+    hours = ((now - win_ts) / 3600.0) if win_ts else 0.0
+    rate24_coin = (mined_window / hours * 24) if hours > 0 else None
 
     # риг-сторона
     token = getattr(config, "HIVE_TOKEN", "") or None
@@ -686,16 +703,17 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
                 workers = []
             kwh_by_farm = {r["farm_id"]: r["kwh_usd"] for r in await db.list_hive_farms(tg_id)}
 
-    res = earnings.compute(c, mined_today, usd, workers, kwh_by_farm, hours)
+    res = earnings.compute(c, mined_window, usd, workers, kwh_by_farm, hours)
     rowsL = res["levels"].get(level, [])
 
     title = {"model": "по моделям", "card": "по картам", "rig": "по ригам"}.get(level, level)
     lines = [f"💰 <b>{c.name}</b> — доходность {title}"]
     rev = res["revenue_usd"]
-    lines.append(f"Выручка за сегодня: {('$%.2f' % rev) if rev is not None else '— (нет курса)'}")
-    lines.append(f"Намайнено за сегодня: {mined_today:.2f} ({hours:.1f} ч)")
-    if partial:
-        lines.append("⚠️ неполный день: учёт с первого среза, не с полуночи")
+    since = _hhmm(win_ts) if win_ts else "—"
+    lines.append(f"Выручка за окно: {('$%.2f' % rev) if rev is not None else '— (нет курса)'}")
+    lines.append(f"Намайнено: {mined_window:.4f} за {hours:.1f} ч (с {since})")
+    if rate24_coin is not None and usd is not None:
+        lines.append(f"Темп: ≈ ${rate24_coin * usd:.2f}/сутки (прогноз)")
     lines.append("")
 
     if not rowsL:
