@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import json
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -676,6 +677,21 @@ def _sum_gains(seq) -> float:
     return s
 
 
+def _mining_start(power_data) -> float | None:
+    """Старт текущего захода по графику хешрейта пула: timestamp начала последнего
+    непрерывного отрезка с local>0. Не зависит от перезапусков бота."""
+    pts = sorted((power_data or []), key=lambda p: p.get("timestamp", 0))
+    if not pts or (pts[-1].get("local") or 0) <= 0:
+        return None
+    start = pts[-1]["timestamp"]
+    for p in reversed(pts[:-1]):
+        if (p.get("local") or 0) > 0:
+            start = p["timestamp"]
+        else:
+            break
+    return start
+
+
 def _hhmm(ts: float) -> str:
     off = getattr(config, "DAY_TZ_OFFSET_HOURS", 0) * 3600
     return time.strftime("%H:%M", time.gmtime(ts + off))
@@ -689,26 +705,27 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
     now = time.time()
     usd = await prices.get_price(c)
 
-    # доход за окно = сумма приростов today_est (растущее поле пула; mined застывает).
-    # окно — текущий заход по разрывам в срезах; приросты переживают обнуление в полночь.
-    poll = getattr(config, "POLL_MINUTES", 10)
-    gap = max(poll * 3, 20) * 60
+    # старт захода берём у пула (график хешрейта), доход = today_est (растущее поле).
+    # окно — 24 часа; если заход короче, текущую скорость натягиваем на 24ч.
     rows = await db.list_accounts(tg_id)
-    mined_window, win_ts, today_est_now = 0.0, None, None
+    income_run, run_start = 0.0, None
     for a in _accounts_for_coin(rows, coin_key):
-        pts = await db.recent_points(tg_id, a["id"])
-        win = _window_slice(pts, gap)
-        if not win:
+        latest = await db.latest_snapshot(tg_id, a["id"])
+        if not latest:
             continue
-        # win новыми вперёд -> для приростов разворачиваем в старое->новое
-        mined_window += _sum_gains([p["today_est"] for p in reversed(win)])
-        win_ts = win[-1]["captured_at"] if win_ts is None else min(win_ts, win[-1]["captured_at"])
-        te = pts[0]["today_est"]
+        te = latest["today_est"]
         if te is not None:
-            today_est_now = (today_est_now or 0.0) + te
+            income_run += te
+        try:
+            raw = json.loads(latest["raw_json"]) if latest["raw_json"] else {}
+            ms = _mining_start((raw.get("power") or {}).get("data"))
+        except Exception:
+            ms = None
+        if ms:
+            run_start = ms if run_start is None else min(run_start, ms)
 
-    hours = ((now - win_ts) / 3600.0) if win_ts else 0.0
-    rate24_coin = (mined_window / hours * 24) if hours > 0 else None
+    hours = min((now - run_start) / 3600.0, 24.0) if run_start else 0.0
+    income_24h = (income_run / hours * 24) if hours > 0 else income_run
 
     # риг-сторона
     token = getattr(config, "HIVE_TOKEN", "") or None
@@ -722,20 +739,19 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
                 workers = []
             kwh_by_farm = {r["farm_id"]: r["kwh_usd"] for r in await db.list_hive_farms(tg_id)}
 
-    res = earnings.compute(c, mined_window, usd, workers, kwh_by_farm, hours)
+    # всё на 24-часовой базе: доход 24ч, потребление за 24ч (ватты*24/1000)
+    res = earnings.compute(c, income_24h, usd, workers, kwh_by_farm, 24.0)
     rowsL = res["levels"].get(level, [])
 
     title = {"model": "по моделям", "card": "по картам", "rig": "по ригам"}.get(level, level)
     lines = [f"💰 <b>{c.name}</b> — доходность {title}"]
-    rev = res["revenue_usd"]
-    since = _hhmm(win_ts) if win_ts else "—"
-    lines.append(f"Выручка за окно: {('$%.2f' % rev) if rev is not None else '— (нет курса)'}")
-    lines.append(f"Намайнено: {mined_window:.4f} за {hours:.1f} ч (с {since})")
-    if today_est_now is not None:
-        te_usd = f" (${today_est_now * usd:.2f})" if usd is not None else ""
-        lines.append(f"За сегодня по пулу: {today_est_now:.2f}{te_usd}")
-    if rate24_coin is not None and usd is not None:
-        lines.append(f"Темп: ≈ ${rate24_coin * usd:.2f}/сутки (прогноз)")
+    since = _hhmm(run_start) if run_start else "—"
+    rev24 = res["revenue_usd"]
+    lines.append(f"За 24ч в текущем темпе: {income_24h:.2f}" +
+                 (f" ≈ ${rev24:.2f}" if rev24 is not None else " (нет курса)"))
+    full = " — полные сутки" if hours >= 24 else f" — пока {hours:.1f} ч, пересчёт на 24ч"
+    fact_usd = f" ≈ ${income_run * usd:.2f}" if usd is not None else ""
+    lines.append(f"Факт за заход (с {since}): {income_run:.2f}{fact_usd}{full}")
     lines.append("")
 
     if not rowsL:
@@ -749,11 +765,11 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
         for r in rowsL:
             cnt = f" ×{r['count']}" if r["count"] > 1 else ""
             rv = f"${r['revenue']:.2f}" if r["revenue"] is not None else "—"
-            pr = f"${r['profit']:.2f}" if r["profit"] is not None else "—"
+            pr = f"${r['profit']:.2f}" if r["profit"] is not None else "нет цены э/э"
             lines.append(f"<b>{r['name']}</b>{cnt}")
-            lines.append(f"   выручка {rv} · э/э {r['kwh']:.1f} кВт⋅ч ({r['power']:.0f} Вт) · прибыль {pr}")
-    if any(r["profit"] is None for r in rowsL):
-        lines.append("\n<i>прибыль «—» — задай цену кВт⋅ч в ⛏ Фермы</i>")
+            lines.append(f"   💵 выручка {rv} · ⚡ прибыль {pr}  ({r['power']:.0f} Вт)")
+    if rowsL and any(r["profit"] is None for r in rowsL):
+        lines.append("\n<i>прибыль без цены — задай $/кВт⋅ч в ⛏ Фермы</i>")
 
     return "\n".join(lines), keyboards.earnings_screen(coin_key, level)
 
