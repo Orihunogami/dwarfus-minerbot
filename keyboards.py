@@ -33,7 +33,7 @@ def card_actions(account_id: int, *, with_back: bool, withdrawals: bool,
     if withdrawals:
         second.append(_btn("💸 Выводы", f"wd:{account_id}"))
     if coin_key:
-        second.append(_btn("📦 Монета", f"coin:{coin_key}"))
+        second.append(_btn("⚙️ Конфиги", f"coin:{coin_key}"))
     rows.append(second)
     rows.append([_btn("⚙️ Аккаунты", "accounts")])
     if with_back:
@@ -102,6 +102,7 @@ def coin_screen(coin_key: str, repos, *, has_suggested: bool) -> InlineKeyboardM
     if repos:
         rows.append([_btn("🔍 Проверить сейчас", f"chkcoin:{coin_key}")])
     rows.append([_btn("💰 Доходность", f"earn:{coin_key}:model")])
+    rows.append([_btn("⛏ Фермы (Hive)", "farms")])
     rows.append([_btn("⬅️ Назад", "home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

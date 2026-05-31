@@ -186,10 +186,6 @@ async def show_home(tg_id: int):
     else:
         text, markup = "Твои аккаунты — выбери:", keyboards.account_picker(rows)
 
-    if getattr(config, "HIVE_TOKEN", ""):
-        markup.inline_keyboard.append(
-            [InlineKeyboardButton(text="⛏ Фермы (Hive)", callback_data="farms")]
-        )
     return text, markup
 
 
@@ -434,7 +430,7 @@ async def build_coin_view(tg_id: int, coin_key: str):
         return None, None
     usd = await prices.get_price(c)
     repos = await db.list_repos(tg_id, coin_key)
-    lines = [f"📦 <b>{c.name}</b>"]
+    lines = [f"⚙️ <b>{c.name}</b> · конфиги"]
     if c.price is not None:
         rate = f"${usd:.4f}" if usd is not None else "недоступен"
         lines.append(f"Курс: {rate}  (источник: {c.price.kind})")
@@ -680,7 +676,7 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
 
     # риг-сторона
     token = getattr(config, "HIVE_TOKEN", "") or None
-    workers, kwh_by_farm = [], {}
+    workers, kwh_by_farm, farm_ids = [], {}, []
     if token:
         farm_ids = await db.list_hive_farm_ids(tg_id)
         if farm_ids:
@@ -703,7 +699,12 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
     lines.append("")
 
     if not rowsL:
-        lines.append("Нет данных по ригам этой монеты (отметь ферму в ⛏ Фермы).")
+        if not token:
+            lines.append("HiveOS не подключён.")
+        elif not farm_ids:
+            lines.append("Фермы не выбраны — отметь в ⛏ Фермы.")
+        else:
+            lines.append("Сейчас нет онлайн-ригов по этой монете (воркеры офлайн?).")
     else:
         for r in rowsL:
             cnt = f" ×{r['count']}" if r["count"] > 1 else ""
