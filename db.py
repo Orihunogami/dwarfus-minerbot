@@ -181,16 +181,18 @@ async def first_snapshot_today(requester_tg_id: int, account_id: int,
 
 async def recent_points(requester_tg_id: int, account_id: int,
                         limit: int = 3000) -> list[asyncpg.Record]:
-    """Последние срезы (captured_at, mined), новые первыми — для поиска окна
-    текущего захода по разрывам во времени."""
+    """Последние срезы (captured_at, mined, today_est), новые первыми — для окна
+    текущего захода по разрывам и расчёта дохода по дельте today_est."""
     async with _pool.acquire() as c:
         return await c.fetch(
-            """SELECT s.captured_at, s.mined FROM snapshots s
+            """SELECT s.captured_at, s.mined, s.today_est FROM snapshots s
                JOIN accounts a ON a.id = s.account_id
                WHERE s.account_id = $1 AND a.tg_id = $2
                ORDER BY s.captured_at DESC LIMIT $3""",
             account_id, requester_tg_id, limit,
         )
+
+
 async def add_repo(tg_id: int, coin_key: str, url: str,
                    kind: str = "miner", watch_mode: str = "auto") -> int:
     async with _pool.acquire() as c:

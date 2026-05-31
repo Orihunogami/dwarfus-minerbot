@@ -650,17 +650,30 @@ def _accounts_for_coin(rows, coin_key: str):
     return out
 
 
-def _window_start(points, gap_sec: int):
-    """points — срезы (captured_at, mined) новыми вперёд. Возвращает самый ранний
-    срез текущего непрерывного захода (до первого разрыва > gap_sec)."""
+def _window_slice(points, gap_sec: int):
+    """points — срезы новыми вперёд. Возвращает срез текущего непрерывного захода
+    (от новейшего до первого разрыва > gap_sec), новыми вперёд."""
     if not points:
-        return None
-    start = points[0]
+        return []
+    win = [points[0]]
     for nxt in points[1:]:
-        if start["captured_at"] - nxt["captured_at"] > gap_sec:
+        if win[-1]["captured_at"] - nxt["captured_at"] > gap_sec:
             break
-        start = nxt
-    return start
+        win.append(nxt)
+    return win
+
+
+def _sum_gains(seq) -> float:
+    """Сумма положительных приростов по последовательности (старое->новое).
+    Переживает обнуление в полночь пула: падение today_est не вычитается."""
+    s, prev = 0.0, None
+    for v in seq:
+        if v is None:
+            continue
+        if prev is not None and v > prev:
+            s += v - prev
+        prev = v
+    return s
 
 
 def _hhmm(ts: float) -> str:
@@ -676,17 +689,23 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
     now = time.time()
     usd = await prices.get_price(c)
 
-    # доход за текущее окно (с последнего запуска/перерыва), по разрывам в срезах
+    # доход за окно = сумма приростов today_est (растущее поле пула; mined застывает).
+    # окно — текущий заход по разрывам в срезах; приросты переживают обнуление в полночь.
     poll = getattr(config, "POLL_MINUTES", 10)
     gap = max(poll * 3, 20) * 60
     rows = await db.list_accounts(tg_id)
-    mined_window, win_ts = 0.0, None
+    mined_window, win_ts, today_est_now = 0.0, None, None
     for a in _accounts_for_coin(rows, coin_key):
-        latest = await db.latest_snapshot(tg_id, a["id"])
-        start = _window_start(await db.recent_points(tg_id, a["id"]), gap)
-        if latest and start and latest["mined"] >= start["mined"]:
-            mined_window += latest["mined"] - start["mined"]
-            win_ts = start["captured_at"] if win_ts is None else min(win_ts, start["captured_at"])
+        pts = await db.recent_points(tg_id, a["id"])
+        win = _window_slice(pts, gap)
+        if not win:
+            continue
+        # win новыми вперёд -> для приростов разворачиваем в старое->новое
+        mined_window += _sum_gains([p["today_est"] for p in reversed(win)])
+        win_ts = win[-1]["captured_at"] if win_ts is None else min(win_ts, win[-1]["captured_at"])
+        te = pts[0]["today_est"]
+        if te is not None:
+            today_est_now = (today_est_now or 0.0) + te
 
     hours = ((now - win_ts) / 3600.0) if win_ts else 0.0
     rate24_coin = (mined_window / hours * 24) if hours > 0 else None
@@ -712,6 +731,9 @@ async def build_earnings_view(tg_id: int, coin_key: str, level: str):
     since = _hhmm(win_ts) if win_ts else "—"
     lines.append(f"Выручка за окно: {('$%.2f' % rev) if rev is not None else '— (нет курса)'}")
     lines.append(f"Намайнено: {mined_window:.4f} за {hours:.1f} ч (с {since})")
+    if today_est_now is not None:
+        te_usd = f" (${today_est_now * usd:.2f})" if usd is not None else ""
+        lines.append(f"За сегодня по пулу: {today_est_now:.2f}{te_usd}")
     if rate24_coin is not None and usd is not None:
         lines.append(f"Темп: ≈ ${rate24_coin * usd:.2f}/сутки (прогноз)")
     lines.append("")
