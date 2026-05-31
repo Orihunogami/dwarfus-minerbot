@@ -21,6 +21,9 @@ CMC_API_KEY = os.environ.get("CMC_API_KEY", "")
 # GitHub токен для проверки версий (опционально; без него анонимный лимит ~60/час на IP)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
+# токен HiveOS API для риг-стороны (опционально; без него Hive-данные недоступны)
+HIVE_TOKEN = os.environ.get("HIVE_TOKEN", "")
+
 # как часто проверять версии репозиториев, минут
 VERSION_CHECK_MINUTES = int(os.environ.get("VERSION_CHECK_MINUTES", "60"))
 

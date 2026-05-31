@@ -37,6 +37,7 @@ class Coin:
     name: str                      # человеку, напр. "Nockchain"
     repos: tuple[Repo, ...] = ()
     price: PriceSource | None = None
+    hive_symbol: str | None = None  # тикер в HiveOS (miners_stats.coin), напр. "NOCK"
 
 
 COINS: dict[str, Coin] = {
@@ -55,9 +56,19 @@ COINS: dict[str, Coin] = {
             symbol="nockchain",
             url="https://coinmarketcap.com/currencies/nockchain/",
         ),
+        hive_symbol="NOCK",
     ),
 }
 
 
 def get(coin_key: str) -> Coin | None:
     return COINS.get(coin_key)
+
+
+def by_hive_symbol(symbol: str) -> Coin | None:
+    """Монета по тикеру из HiveOS (miners_stats.coin), напр. 'NOCK' -> nockchain."""
+    s = (symbol or "").upper()
+    for c in COINS.values():
+        if c.hive_symbol and c.hive_symbol.upper() == s:
+            return c
+    return None
