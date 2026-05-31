@@ -87,7 +87,7 @@ async def add_account(tg_id: int, wallet: str, password_enc: str, label: str | N
 async def list_accounts(requester_tg_id: int) -> list[asyncpg.Record]:
     async with _pool.acquire() as c:
         return await c.fetch(
-            "SELECT id, wallet, label, is_active FROM accounts "
+            "SELECT id, wallet, label, is_active, provider_key FROM accounts "
             "WHERE tg_id = $1 ORDER BY created_at",
             requester_tg_id,
         )

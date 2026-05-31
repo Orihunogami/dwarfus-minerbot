@@ -21,7 +21,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from aiogram.client.session.aiohttp import AiohttpSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -29,6 +29,8 @@ import config
 import db
 import crypto
 import collector
+import keyboards
+from providers import registry
 from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
 
@@ -94,18 +96,65 @@ def _fmt_account_stats(label: str, wallet: str, snap, income_today) -> str:
     )
 
 
+# ---------- карточка и меню (общее для команд и кнопок) ----------
+async def account_card(tg_id: int, acc_row, *, force_refresh: bool = False) -> str:
+    """Текст карточки одного аккаунта: при необходимости делает живой запрос,
+    считает доход за сутки и форматирует. acc_row нужен с полями id/wallet/label."""
+    day_start = _day_start_ts()
+    now = time.time()
+    aid = acc_row["id"]
+    snap = await db.latest_snapshot(tg_id, aid)
+    if force_refresh or snap is None or (now - snap["captured_at"]) > STALE_SECONDS:
+        full = await db.get_account(tg_id, aid)
+        if full is not None:
+            await collector.collect_account(full)
+            snap = await db.latest_snapshot(tg_id, aid)
+    income = None
+    if snap is not None:
+        base = await db.mined_at_day_start(tg_id, aid, day_start)
+        if base is not None and snap["mined"] >= base:
+            income = snap["mined"] - base
+    return _fmt_account_stats(acc_row["label"], acc_row["wallet"], snap, income)
+
+
+def _wd_cap(acc_row) -> bool:
+    """Умеет ли провайдер этого аккаунта выводы (показывать кнопку или нет)."""
+    p = registry.get(acc_row["provider_key"]) if "provider_key" in acc_row else None
+    return bool(p and p.capabilities.withdrawals)
+
+
+async def show_home(tg_id: int):
+    """Возвращает (text, markup) домашнего экрана. Пока монета/способ одни —
+    эти уровни пропускаются: 0 аккаунтов -> подключить, 1 -> сразу карточка,
+    больше -> список выбора."""
+    rows = await db.list_accounts(tg_id)
+    if not rows:
+        return (
+            "Бот мониторинга майнинга.\n\n"
+            "Подключи первый аккаунт — дальше всё в кнопках.\n"
+            "Данные видишь только ты, пароль хранится зашифрованным.",
+            keyboards.home_no_accounts(),
+        )
+    if len(rows) == 1:
+        text = await account_card(tg_id, rows[0])
+        return text, keyboards.card_actions(rows[0]["id"], with_back=False, withdrawals=_wd_cap(rows[0]))
+    return "Твои аккаунты — выбери:", keyboards.account_picker(rows)
+
+
+async def _safe_edit(cq: CallbackQuery, text: str, markup) -> None:
+    """Редактирует сообщение под кнопкой; глотает 'message is not modified' и т.п."""
+    try:
+        await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        log.debug("edit_text skip: %s", e)
+
+
 # ---------- commands ----------
 @dp.message(CommandStart())
-async def start(m: Message):
-    await m.answer(
-        "Бот мониторинга GoldenMiner.\n\n"
-        "/login — подключить аккаунт (кош + пароль)\n"
-        "/stats — статистика и доход за сегодня\n"
-        "/withdrawals — история выводов\n"
-        "/accounts — твои аккаунты\n"
-        "/logout — отключить аккаунт\n\n"
-        "Данные видишь только ты. Пароль хранится в зашифрованном виде."
-    )
+async def start(m: Message, state: FSMContext):
+    await state.clear()
+    text, markup = await show_home(m.from_user.id)
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @dp.message(Command("login"))
@@ -159,11 +208,10 @@ async def login_password(m: Message, state: FSMContext):
         password_enc=crypto.encrypt(password),
         label=None,
     )
-    await status.edit_text(
-        f"Готово, аккаунт подключён ✅\n"
-        f"Сбор данных пошёл. Через пару минут смотри /stats."
-    )
+    await status.edit_text("Готово, аккаунт подключён ✅\nСобираю данные…")
     log.info("user %s added account %s", m.from_user.id, acc_id)
+    text, markup = await show_home(m.from_user.id)
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @dp.message(Command("accounts"))
@@ -186,23 +234,7 @@ async def stats(m: Message):
         await m.answer("Нет аккаунтов. /login чтобы добавить.")
         return
     status = await m.answer("Собираю свежие данные…")
-    day_start = _day_start_ts()
-    now = time.time()
-    blocks = []
-    for r in rows:
-        snap = await db.latest_snapshot(m.from_user.id, r["id"])
-        # живой запрос, если данных ещё нет или они устарели
-        if snap is None or (now - snap["captured_at"]) > STALE_SECONDS:
-            acc = await db.get_account(m.from_user.id, r["id"])
-            if acc is not None:
-                await collector.collect_account(acc)
-                snap = await db.latest_snapshot(m.from_user.id, r["id"])
-        income = None
-        if snap is not None:
-            base = await db.mined_at_day_start(m.from_user.id, r["id"], day_start)
-            if base is not None and snap["mined"] >= base:
-                income = snap["mined"] - base
-        blocks.append(_fmt_account_stats(r["label"], r["wallet"], snap, income))
+    blocks = [await account_card(m.from_user.id, r) for r in rows]
     await status.edit_text("\n\n".join(blocks), parse_mode="HTML")
 
 
@@ -261,6 +293,88 @@ async def logout(m: Message):
     else:
         ids = ", ".join(f"#{r['id']}" for r in rows)
         await m.answer(f"У тебя несколько аккаунтов ({ids}). Укажи: /logout <id>")
+
+
+# ---------- inline-кнопки ----------
+@dp.callback_query(F.data == "home")
+async def cb_home(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, markup = await show_home(cq.from_user.id)
+    await _safe_edit(cq, text, markup)
+    await cq.answer()
+
+
+@dp.callback_query(F.data.startswith("acc:"))
+async def cb_account(cq: CallbackQuery):
+    aid = int(cq.data.split(":")[1])
+    acc = await db.get_account(cq.from_user.id, aid)
+    if acc is None:
+        await cq.answer("Аккаунт не найден", show_alert=True)
+        return
+    await cq.answer("Обновляю…")
+    text = await account_card(cq.from_user.id, acc, force_refresh=True)
+    rows = await db.list_accounts(cq.from_user.id)
+    await _safe_edit(
+        cq, text,
+        keyboards.card_actions(aid, with_back=len(rows) > 1, withdrawals=_wd_cap(acc)),
+    )
+
+
+@dp.callback_query(F.data.startswith("wd:"))
+async def cb_withdrawals(cq: CallbackQuery):
+    aid = int(cq.data.split(":")[1])
+    acc = await db.get_account(cq.from_user.id, aid)
+    if acc is None:
+        await cq.answer("Аккаунт не найден", show_alert=True)
+        return
+    await cq.answer("Запрашиваю выводы…")
+    name = acc["label"] or (acc["wallet"][:10] + "…")
+    try:
+        txs = await collector.withdrawals_for(acc)
+    except Exception as e:
+        await _safe_edit(cq, f"💸 <b>{name}</b>\nне удалось получить: {e}",
+                         keyboards.back_to(f"acc:{aid}"))
+        return
+    if not txs:
+        body = f"💸 <b>{name}</b>\nвыводов пока не было"
+    else:
+        txs = sorted(txs, key=lambda t: t.get("timestamp", 0), reverse=True)[:5]
+        lines = []
+        for t in txs:
+            date = time.strftime("%d.%m.%Y", time.localtime(t.get("timestamp", 0)))
+            lines.append(
+                f" • {t.get('amount', 0):.2f} (комиссия {t.get('fee', 0)}) "
+                f"— {t.get('status')} — {date}"
+            )
+        body = f"💸 <b>{name}</b>\n" + "\n".join(lines)
+    await _safe_edit(cq, body, keyboards.back_to(f"acc:{aid}"))
+
+
+@dp.callback_query(F.data == "accounts")
+async def cb_accounts(cq: CallbackQuery):
+    rows = await db.list_accounts(cq.from_user.id)
+    if not rows:
+        await _safe_edit(cq, "Нет аккаунтов.", keyboards.home_no_accounts())
+    else:
+        await _safe_edit(cq, "Аккаунты — управление:", keyboards.accounts_manage(rows))
+    await cq.answer()
+
+
+@dp.callback_query(F.data.startswith("logout:"))
+async def cb_logout(cq: CallbackQuery):
+    aid = int(cq.data.split(":")[1])
+    ok = await db.delete_account(cq.from_user.id, aid)
+    await collector._drop_client(aid)
+    await cq.answer("Аккаунт удалён" if ok else "Не найден", show_alert=not ok)
+    text, markup = await show_home(cq.from_user.id)
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data == "login")
+async def cb_login(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(LoginFlow.wallet)
+    await cq.message.answer("Пришли адрес кошелька (username с сайта).")
+    await cq.answer()
 
 
 # ---------- entrypoint ----------
