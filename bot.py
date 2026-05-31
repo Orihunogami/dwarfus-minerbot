@@ -69,16 +69,19 @@ def _fmt_account_stats(label: str, wallet: str, snap, income_today, usd_price=No
         return f"💎 <b>{name}</b>\nещё нет данных — collector скоро соберёт"
 
     inc = f"+{income_today:.2f}" if income_today is not None else "копим данные"
+    te = snap["today_est"] or 0
+    te_usd = f" (${te * usd_price:.2f})" if usd_price is not None else ""
     overview = (
         f"Намайнено        {snap['mined']:>10.2f}\n"
         f"Заблокировано    {snap['locked']:>10.2f}\n"
         f"Доступно         {snap['transferable']:>10.2f}\n"
-        f"Прогноз сегодня  {snap['today_est']:>10.2f}\n"
+        f"Прогноз сегодня  {snap['today_est']:>10.2f}{te_usd}\n"
         f"Доход за сутки   {inc:>10}"
     )
     if usd_price is not None:
         worth = (snap["transferable"] or 0) * usd_price
         overview += (
+            "\n──────────────────────────"
             f"\nКурс             {usd_price:>10.4f}$"
             f"\nДоступно в $     {worth:>10.2f}$"
         )
@@ -97,7 +100,7 @@ def _fmt_account_stats(label: str, wallet: str, snap, income_today, usd_price=No
 
     return (
         f"💎 <b>{name}</b>\n"
-        f"<pre>{overview}</pre>"
+        f"<pre>{overview}</pre>\n"
         f"⚡️ Хешрейт: local {snap['local_rate']:.0f} · real {snap['real_rate']:.0f} p/s\n"
         f"{dev_block}\n"
         f"🕒 обновлено {_ago(snap['captured_at'])}"
