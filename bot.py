@@ -39,6 +39,13 @@ from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
 
 log = logging.getLogger("bot")
+auth_log = logging.getLogger("auth")
+
+
+def _who(u) -> str:
+    """Строка для журнала auth: id, username, имя."""
+    uname = f"@{u.username}" if u.username else "—"
+    return f"tg_id={u.id} {uname} ({u.full_name})"
 
 dp = Dispatcher()
 
@@ -185,6 +192,7 @@ async def _safe_edit(cq: CallbackQuery, text: str, markup) -> None:
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
+    auth_log.info("start | %s", _who(m.from_user))
     text, markup = await show_home(m.from_user.id)
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
@@ -242,6 +250,7 @@ async def login_password(m: Message, state: FSMContext):
     )
     await status.edit_text("Готово, аккаунт подключён ✅\nСобираю данные…")
     log.info("user %s added account %s", m.from_user.id, acc_id)
+    auth_log.info("add_account | %s | acc=%s", _who(m.from_user), acc_id)
     text, markup = await show_home(m.from_user.id)
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
@@ -398,6 +407,8 @@ async def cb_logout(cq: CallbackQuery):
     aid = int(cq.data.split(":")[1])
     ok = await db.delete_account(cq.from_user.id, aid)
     await collector._drop_client(aid)
+    if ok:
+        auth_log.info("logout | %s | acc=%s", _who(cq.from_user), aid)
     await cq.answer("Аккаунт удалён" if ok else "Не найден", show_alert=not ok)
     text, markup = await show_home(cq.from_user.id)
     await _safe_edit(cq, text, markup)

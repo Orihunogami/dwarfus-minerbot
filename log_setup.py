@@ -36,3 +36,15 @@ def setup_logging() -> None:
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    # отдельный журнал входов/действий пользователей -> logs/auth.log
+    # propagate=False, чтобы записи не дублировались в bot.log и консоль
+    auth = logging.getLogger("auth")
+    auth.setLevel(logging.INFO)
+    auth.propagate = False
+    auth.handlers.clear()
+    authh = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "auth.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8"
+    )
+    authh.setFormatter(fmt)
+    auth.addHandler(authh)
