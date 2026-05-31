@@ -15,6 +15,9 @@ FERNET_KEY = os.environ.get("FERNET_KEY", "")
 # PostgreSQL DSN, напр.: postgresql://gm:gmpass@localhost:5432/goldenminer
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# ключ CoinMarketCap для курсов (опционально; нет ключа -> бот работает, но без $)
+CMC_API_KEY = os.environ.get("CMC_API_KEY", "")
+
 # как часто collector опрашивает аккаунты, минут
 POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "10"))
 

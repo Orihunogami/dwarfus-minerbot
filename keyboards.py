@@ -26,13 +26,16 @@ def home_no_accounts() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn("➕ Подключить аккаунт", "login")]])
 
 
-def card_actions(account_id: int, *, with_back: bool, withdrawals: bool) -> InlineKeyboardMarkup:
+def card_actions(account_id: int, *, with_back: bool, withdrawals: bool,
+                 coin_key: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [[_btn("🔄 Обновить", f"acc:{account_id}")]]
     second: list[InlineKeyboardButton] = []
     if withdrawals:
         second.append(_btn("💸 Выводы", f"wd:{account_id}"))
-    second.append(_btn("⚙️ Аккаунты", "accounts"))
+    if coin_key:
+        second.append(_btn("📦 Монета", f"coin:{coin_key}"))
     rows.append(second)
+    rows.append([_btn("⚙️ Аккаунты", "accounts")])
     if with_back:
         rows.append([_btn("⬅️ Назад", "home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

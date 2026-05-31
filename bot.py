@@ -30,6 +30,8 @@ import db
 import crypto
 import collector
 import keyboards
+import coins
+import prices
 from providers import registry
 from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
@@ -60,7 +62,7 @@ def _ago(captured_at: int) -> str:
     return "только что" if mins < 1 else f"{mins} мин назад"
 
 
-def _fmt_account_stats(label: str, wallet: str, snap, income_today) -> str:
+def _fmt_account_stats(label: str, wallet: str, snap, income_today, usd_price=None) -> str:
     import json
     name = label or (wallet[:10] + "…")
     if snap is None:
@@ -74,6 +76,12 @@ def _fmt_account_stats(label: str, wallet: str, snap, income_today) -> str:
         f"Прогноз сегодня  {snap['today_est']:>10.2f}\n"
         f"Доход за сутки   {inc:>10}"
     )
+    if usd_price is not None:
+        worth = (snap["transferable"] or 0) * usd_price
+        overview += (
+            f"\nКурс             {usd_price:>10.4f}$"
+            f"\nДоступно в $     {worth:>10.2f}$"
+        )
 
     try:
         devs = json.loads(snap["devices_json"]) if snap.get("devices_json") else []
@@ -114,7 +122,19 @@ async def account_card(tg_id: int, acc_row, *, force_refresh: bool = False) -> s
         base = await db.mined_at_day_start(tg_id, aid, day_start)
         if base is not None and snap["mined"] >= base:
             income = snap["mined"] - base
-    return _fmt_account_stats(acc_row["label"], acc_row["wallet"], snap, income)
+    usd = await prices.get_price(_coin_of(acc_row))
+    return _fmt_account_stats(acc_row["label"], acc_row["wallet"], snap, income, usd_price=usd)
+
+
+def _coin_of(acc_row):
+    """Объект монеты (coins.Coin) для аккаунта или None."""
+    p = registry.get(acc_row["provider_key"]) if "provider_key" in acc_row else None
+    return coins.get(p.meta.coin) if p else None
+
+
+def _coin_key_of(acc_row) -> str | None:
+    c = _coin_of(acc_row)
+    return c.key if c else None
 
 
 def _wd_cap(acc_row) -> bool:
@@ -137,7 +157,10 @@ async def show_home(tg_id: int):
         )
     if len(rows) == 1:
         text = await account_card(tg_id, rows[0])
-        return text, keyboards.card_actions(rows[0]["id"], with_back=False, withdrawals=_wd_cap(rows[0]))
+        return text, keyboards.card_actions(
+            rows[0]["id"], with_back=False, withdrawals=_wd_cap(rows[0]),
+            coin_key=_coin_key_of(rows[0]),
+        )
     return "Твои аккаунты — выбери:", keyboards.account_picker(rows)
 
 
@@ -316,7 +339,8 @@ async def cb_account(cq: CallbackQuery):
     rows = await db.list_accounts(cq.from_user.id)
     await _safe_edit(
         cq, text,
-        keyboards.card_actions(aid, with_back=len(rows) > 1, withdrawals=_wd_cap(acc)),
+        keyboards.card_actions(aid, with_back=len(rows) > 1, withdrawals=_wd_cap(acc),
+                               coin_key=_coin_key_of(acc)),
     )
 
 
@@ -368,6 +392,29 @@ async def cb_logout(cq: CallbackQuery):
     await cq.answer("Аккаунт удалён" if ok else "Не найден", show_alert=not ok)
     text, markup = await show_home(cq.from_user.id)
     await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("coin:"))
+async def cb_coin(cq: CallbackQuery):
+    coin_key = cq.data.split(":", 1)[1]
+    c = coins.get(coin_key)
+    if c is None:
+        await cq.answer("Монета не найдена", show_alert=True)
+        return
+    await cq.answer()
+    usd = await prices.get_price(c)
+    lines = [f"📦 <b>{c.name}</b>"]
+    if c.price is not None:
+        rate = f"${usd:.4f}" if usd is not None else "недоступен"
+        lines.append(f"Курс: {rate}  (источник: {c.price.kind})")
+    if c.repos:
+        lines.append("\nРепозитории:")
+        for r in c.repos:
+            lines.append(f" • {r.kind} — {r.url}")
+    else:
+        lines.append("\nРепозитории не привязаны.")
+    lines.append("\n<i>Управление репами и слежение за версиями — следующим шагом.</i>")
+    await _safe_edit(cq, "\n".join(lines), keyboards.back_to("home"))
 
 
 @dp.callback_query(F.data == "login")
