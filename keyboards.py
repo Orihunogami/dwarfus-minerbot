@@ -101,5 +101,15 @@ def coin_screen(coin_key: str, repos, *, has_suggested: bool) -> InlineKeyboardM
     rows.append([_btn("➕ Добавить репу", f"addrepo:{coin_key}")])
     if repos:
         rows.append([_btn("🔍 Проверить сейчас", f"chkcoin:{coin_key}")])
+    rows.append([_btn("💰 Доходность", f"earn:{coin_key}:model")])
     rows.append([_btn("⬅️ Назад", "home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def earnings_screen(coin_key: str, level: str) -> InlineKeyboardMarkup:
+    def lbl(lv: str, title: str) -> InlineKeyboardButton:
+        return _btn(("• " if lv == level else "") + title, f"earn:{coin_key}:{lv}")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [lbl("model", "Модели"), lbl("card", "Карты"), lbl("rig", "Риги")],
+        [_btn("⬅️ Назад", f"coin:{coin_key}")],
+    ])

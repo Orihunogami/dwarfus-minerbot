@@ -120,21 +120,45 @@ async def fetch_farm_gpus(token: str, farm_id: int) -> list[list[dict]]:
 
 
 _agg_cache: dict[tuple, tuple[float, dict]] = {}
+_workers_cache: dict[tuple, tuple[float, list]] = {}
+
+
+async def fetch_farm_workers(token: str, farm_id: int) -> list[dict]:
+    """Онлайн-воркеры фермы с именами: [{worker, farm_id, gpus:[...]}]."""
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=30.0, headers=_headers(token)) as c:
+        r = await c.get(BASE + f"/farms/{farm_id}/workers")
+        r.raise_for_status()
+        for w in r.json().get("data", []):
+            if not (w.get("stats") or {}).get("online"):
+                continue
+            rd = await c.get(BASE + f"/farms/{farm_id}/workers/{w['id']}")
+            if rd.status_code == 200:
+                out.append({"worker": w.get("name") or str(w.get("id")),
+                            "farm_id": farm_id, "gpus": worker_gpus(rd.json())})
+            else:
+                log.warning("worker %s/%s -> HTTP %s", farm_id, w.get("id"), rd.status_code)
+    return out
+
+
+async def farms_workers(token: str, farm_ids: list[int], ttl: int = 120) -> list[dict]:
+    """Воркеры по нескольким фермам с TTL-кешем."""
+    key = tuple(sorted(farm_ids))
+    now = time.time()
+    hit = _workers_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    res: list[dict] = []
+    for fid in farm_ids:
+        try:
+            res += await fetch_farm_workers(token, fid)
+        except Exception as e:
+            log.warning("farm %s: %s", fid, e)
+    _workers_cache[key] = (now, res)
+    return res
 
 
 async def farms_aggregate(token: str, farm_ids: list[int], ttl: int = 120) -> dict:
-    """Агрегат по нескольким фермам с TTL-кешем. {coin: {hash,power,gpus,models}}."""
-    key = tuple(sorted(farm_ids))
-    now = time.time()
-    hit = _agg_cache.get(key)
-    if hit and now - hit[0] < ttl:
-        return hit[1]
-    lists: list[list[dict]] = []
-    for fid in farm_ids:
-        try:
-            lists += await fetch_farm_gpus(token, fid)
-        except Exception as e:
-            log.warning("farm %s: %s", fid, e)
-    agg = aggregate(lists)
-    _agg_cache[key] = (now, agg)
-    return agg
+    """Агрегат по монетам/моделям поверх кешированных воркеров."""
+    workers = await farms_workers(token, farm_ids, ttl)
+    return aggregate([w["gpus"] for w in workers])

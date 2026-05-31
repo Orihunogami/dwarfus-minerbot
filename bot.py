@@ -35,6 +35,7 @@ import prices
 import versions
 import watcher
 import hive
+import earnings
 from providers import registry
 from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
@@ -642,6 +643,86 @@ async def setkwh_value(m: Message, state: FSMContext):
     await m.answer("Цена сохранена ✅" if val > 0 else "Цена убрана")
     text, markup = await build_farms_view(m.from_user.id)
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+def _accounts_for_coin(rows, coin_key: str):
+    out = []
+    for r in rows:
+        p = registry.get(r["provider_key"]) if "provider_key" in r else None
+        if p and p.meta.coin == coin_key:
+            out.append(r)
+    return out
+
+
+async def build_earnings_view(tg_id: int, coin_key: str, level: str):
+    c = coins.get(coin_key)
+    if c is None:
+        return "Монета не найдена.", keyboards.back_to("home")
+
+    day_start = _day_start_ts()
+    now = time.time()
+    usd = await prices.get_price(c)
+
+    # доход за сегодня (с пул-стороны) + пометка неполного дня
+    rows = await db.list_accounts(tg_id)
+    mined_today, first_ts, partial = 0.0, None, False
+    for a in _accounts_for_coin(rows, coin_key):
+        latest = await db.latest_snapshot(tg_id, a["id"])
+        first = await db.first_snapshot_today(tg_id, a["id"], day_start)
+        if latest and first and latest["mined"] >= first["mined"]:
+            mined_today += latest["mined"] - first["mined"]
+            ft = first["captured_at"]
+            first_ts = ft if first_ts is None else min(first_ts, ft)
+            if ft > day_start + 1800:   # первый срез позже чем +30 мин от полуночи
+                partial = True
+
+    hours = ((now - first_ts) / 3600.0) if first_ts else 0.0
+
+    # риг-сторона
+    token = getattr(config, "HIVE_TOKEN", "") or None
+    workers, kwh_by_farm = [], {}
+    if token:
+        farm_ids = await db.list_hive_farm_ids(tg_id)
+        if farm_ids:
+            try:
+                workers = await hive.farms_workers(token, farm_ids)
+            except Exception:
+                workers = []
+            kwh_by_farm = {r["farm_id"]: r["kwh_usd"] for r in await db.list_hive_farms(tg_id)}
+
+    res = earnings.compute(c, mined_today, usd, workers, kwh_by_farm, hours)
+    rowsL = res["levels"].get(level, [])
+
+    title = {"model": "по моделям", "card": "по картам", "rig": "по ригам"}.get(level, level)
+    lines = [f"💰 <b>{c.name}</b> — доходность {title}"]
+    rev = res["revenue_usd"]
+    lines.append(f"Выручка за сегодня: {('$%.2f' % rev) if rev is not None else '— (нет курса)'}")
+    lines.append(f"Намайнено за сегодня: {mined_today:.2f} ({hours:.1f} ч)")
+    if partial:
+        lines.append("⚠️ неполный день: учёт с первого среза, не с полуночи")
+    lines.append("")
+
+    if not rowsL:
+        lines.append("Нет данных по ригам этой монеты (отметь ферму в ⛏ Фермы).")
+    else:
+        for r in rowsL:
+            cnt = f" ×{r['count']}" if r["count"] > 1 else ""
+            rv = f"${r['revenue']:.2f}" if r["revenue"] is not None else "—"
+            pr = f"${r['profit']:.2f}" if r["profit"] is not None else "—"
+            lines.append(f"<b>{r['name']}</b>{cnt}")
+            lines.append(f"   выручка {rv} · э/э {r['kwh']:.1f} кВт⋅ч ({r['power']:.0f} Вт) · прибыль {pr}")
+    if any(r["profit"] is None for r in rowsL):
+        lines.append("\n<i>прибыль «—» — задай цену кВт⋅ч в ⛏ Фермы</i>")
+
+    return "\n".join(lines), keyboards.earnings_screen(coin_key, level)
+
+
+@dp.callback_query(F.data.startswith("earn:"))
+async def cb_earn(cq: CallbackQuery):
+    _, coin_key, level = cq.data.split(":", 2)
+    await cq.answer("Считаю…")
+    text, markup = await build_earnings_view(cq.from_user.id, coin_key, level)
+    await _safe_edit(cq, text, markup)
 
 
 @dp.callback_query(F.data == "login")

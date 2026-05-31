@@ -165,7 +165,18 @@ async def mined_at_day_start(requester_tg_id: int, account_id: int, day_start: i
         )
 
 
-# ---------- репозитории (всегда с tg_id) ----------
+async def first_snapshot_today(requester_tg_id: int, account_id: int,
+                               day_start: int) -> asyncpg.Record | None:
+    """Первый снапшот ПОСЛЕ начала дня (mined + captured_at) — для honest расчёта
+    дохода за сегодня и пометки 'неполный день'."""
+    async with _pool.acquire() as c:
+        return await c.fetchrow(
+            """SELECT s.mined, s.captured_at FROM snapshots s
+               JOIN accounts a ON a.id = s.account_id
+               WHERE s.account_id = $1 AND a.tg_id = $2 AND s.captured_at >= $3
+               ORDER BY s.captured_at ASC LIMIT 1""",
+            account_id, requester_tg_id, day_start,
+        )
 async def add_repo(tg_id: int, coin_key: str, url: str,
                    kind: str = "miner", watch_mode: str = "auto") -> int:
     async with _pool.acquire() as c:
