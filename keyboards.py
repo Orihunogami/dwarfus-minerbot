@@ -65,6 +65,25 @@ def back_to(data: str = "home") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", data)]])
 
 
+def hive_farms_screen(farms: list[dict], watched: dict[int, dict]) -> InlineKeyboardMarkup:
+    """farms — из API [{id,name,online,total}]; watched — {farm_id: row} выбранные."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for f in farms:
+        fid = f["id"]
+        on = fid in watched
+        mark = "✅" if on else "☐"
+        name = (f["name"] or str(fid))[:20]
+        label = f"{mark} {name} ({f['online']}/{f['total']})"
+        row = [_btn(label, f"hfarm:{fid}")]
+        if on:
+            w = watched[fid]
+            price = f"{w['kwh_usd']:.3f}$" if w["kwh_usd"] is not None else "⚡цена"
+            row.append(_btn(price, f"hkwh:{fid}"))
+        rows.append(row)
+    rows.append([_btn("⬅️ Назад", "home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _repo_short(url: str) -> str:
     return url.rstrip("/").split("/")[-1][:18]
 

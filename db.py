@@ -73,6 +73,18 @@ CREATE TABLE IF NOT EXISTS repos (
 );
 CREATE INDEX IF NOT EXISTS idx_repos_tg    ON repos(tg_id);
 CREATE INDEX IF NOT EXISTS idx_repos_watch ON repos(watch_enabled);
+
+-- выбранные фермы HiveOS под наблюдение + цена электричества ($/кВт⋅ч) на ферму
+CREATE TABLE IF NOT EXISTS hive_farms (
+    id         BIGSERIAL PRIMARY KEY,
+    tg_id      BIGINT NOT NULL,
+    farm_id    BIGINT NOT NULL,
+    name       TEXT,
+    kwh_usd    DOUBLE PRECISION,
+    created_at BIGINT NOT NULL,
+    UNIQUE (tg_id, farm_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hive_farms_tg ON hive_farms(tg_id);
 """
 
 
@@ -207,6 +219,39 @@ async def set_repo_version(requester_tg_id: int, repo_id: int,
             "WHERE id = $1 AND tg_id = $2",
             repo_id, requester_tg_id, version, url, checked_at,
         )
+
+
+# ---------- фермы HiveOS (всегда с tg_id) ----------
+async def toggle_hive_farm(tg_id: int, farm_id: int, name: str) -> bool:
+    """Включить/выключить ферму под наблюдение. Возвращает новое состояние (True=включена)."""
+    async with _pool.acquire() as c:
+        exists = await c.fetchval(
+            "SELECT 1 FROM hive_farms WHERE tg_id=$1 AND farm_id=$2", tg_id, farm_id)
+        if exists:
+            await c.execute("DELETE FROM hive_farms WHERE tg_id=$1 AND farm_id=$2", tg_id, farm_id)
+            return False
+        await c.execute(
+            "INSERT INTO hive_farms (tg_id, farm_id, name, created_at) VALUES ($1,$2,$3,$4)",
+            tg_id, farm_id, name, int(time.time()))
+        return True
+
+
+async def list_hive_farms(requester_tg_id: int) -> list[asyncpg.Record]:
+    async with _pool.acquire() as c:
+        return await c.fetch(
+            "SELECT * FROM hive_farms WHERE tg_id=$1 ORDER BY created_at", requester_tg_id)
+
+
+async def list_hive_farm_ids(requester_tg_id: int) -> list[int]:
+    rows = await list_hive_farms(requester_tg_id)
+    return [r["farm_id"] for r in rows]
+
+
+async def set_hive_kwh(tg_id: int, farm_id: int, kwh_usd: float | None) -> None:
+    async with _pool.acquire() as c:
+        await c.execute(
+            "UPDATE hive_farms SET kwh_usd=$3 WHERE tg_id=$1 AND farm_id=$2",
+            tg_id, farm_id, kwh_usd)
 
 
 # ---------- внутренние операции collector (без tg_id, не для пользователя) ----------

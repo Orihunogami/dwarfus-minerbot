@@ -11,6 +11,7 @@ Per-GPU данные (хешрейт, мощность) лежат в детал
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 
 import httpx
@@ -116,3 +117,24 @@ async def fetch_farm_gpus(token: str, farm_id: int) -> list[list[dict]]:
             else:
                 log.warning("worker %s/%s -> HTTP %s", farm_id, w.get("id"), rd.status_code)
     return out
+
+
+_agg_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+async def farms_aggregate(token: str, farm_ids: list[int], ttl: int = 120) -> dict:
+    """Агрегат по нескольким фермам с TTL-кешем. {coin: {hash,power,gpus,models}}."""
+    key = tuple(sorted(farm_ids))
+    now = time.time()
+    hit = _agg_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    lists: list[list[dict]] = []
+    for fid in farm_ids:
+        try:
+            lists += await fetch_farm_gpus(token, fid)
+        except Exception as e:
+            log.warning("farm %s: %s", fid, e)
+    agg = aggregate(lists)
+    _agg_cache[key] = (now, agg)
+    return agg

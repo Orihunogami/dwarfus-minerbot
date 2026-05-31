@@ -21,7 +21,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -34,6 +34,7 @@ import coins
 import prices
 import versions
 import watcher
+import hive
 from providers import registry
 from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
@@ -60,6 +61,10 @@ class LoginFlow(StatesGroup):
 
 class AddRepo(StatesGroup):
     url = State()
+
+
+class SetKwh(StatesGroup):
+    value = State()
 
 
 # ---------- helpers ----------
@@ -165,19 +170,26 @@ async def show_home(tg_id: int):
     больше -> список выбора."""
     rows = await db.list_accounts(tg_id)
     if not rows:
-        return (
+        text, markup = (
             "Бот мониторинга майнинга.\n\n"
             "Подключи первый аккаунт — дальше всё в кнопках.\n"
             "Данные видишь только ты, пароль хранится зашифрованным.",
             keyboards.home_no_accounts(),
         )
-    if len(rows) == 1:
+    elif len(rows) == 1:
         text = await account_card(tg_id, rows[0])
-        return text, keyboards.card_actions(
+        markup = keyboards.card_actions(
             rows[0]["id"], with_back=False, withdrawals=_wd_cap(rows[0]),
             coin_key=_coin_key_of(rows[0]),
         )
-    return "Твои аккаунты — выбери:", keyboards.account_picker(rows)
+    else:
+        text, markup = "Твои аккаунты — выбери:", keyboards.account_picker(rows)
+
+    if getattr(config, "HIVE_TOKEN", ""):
+        markup.inline_keyboard.append(
+            [InlineKeyboardButton(text="⛏ Фермы (Hive)", callback_data="farms")]
+        )
+    return text, markup
 
 
 async def _safe_edit(cq: CallbackQuery, text: str, markup) -> None:
@@ -425,6 +437,21 @@ async def build_coin_view(tg_id: int, coin_key: str):
     if c.price is not None:
         rate = f"${usd:.4f}" if usd is not None else "недоступен"
         lines.append(f"Курс: {rate}  (источник: {c.price.kind})")
+
+    # риг-сторона: Hive
+    token = getattr(config, "HIVE_TOKEN", "") or None
+    if token and c.hive_symbol:
+        farm_ids = await db.list_hive_farm_ids(tg_id)
+        if farm_ids:
+            try:
+                agg = await hive.farms_aggregate(token, farm_ids)
+            except Exception:
+                agg = {}
+            rd = agg.get(c.hive_symbol)
+            if rd:
+                lines.append(f"Риги: {rd['gpus']} карт онлайн · {rd['power']:.0f} Вт")
+                for model, m in rd["models"].items():
+                    lines.append(f"  {model} ×{m['count']}")
     lines.append("")
     if repos:
         lines.append("Репозитории (👁 — на слежении):")
@@ -549,6 +576,72 @@ async def cb_chkcoin(cq: CallbackQuery):
         lines.append(f" • {name}: {ver} ({latest.get('kind')}){mark}")
         await db.set_repo_version(cq.from_user.id, r["id"], ver, latest.get("url"), int(time.time()))
     await _safe_edit(cq, "\n".join(lines), keyboards.back_to(f"coin:{coin_key}"))
+
+
+async def build_farms_view(tg_id: int):
+    token = getattr(config, "HIVE_TOKEN", "") or None
+    if not token:
+        return "HiveOS не подключён (нет HIVE_TOKEN).", keyboards.back_to("home")
+    try:
+        farms = await hive.fetch_farms(token)
+    except Exception as e:
+        return f"Не удалось получить фермы: {e}", keyboards.back_to("home")
+    watched = {r["farm_id"]: r for r in await db.list_hive_farms(tg_id)}
+    text = ("⛏ <b>Фермы HiveOS</b>\n"
+            "Отметь фермы под наблюдение. ⚡ — задать цену электричества ($/кВт⋅ч) "
+            "для расчёта прибыли.")
+    return text, keyboards.hive_farms_screen(farms, watched)
+
+
+@dp.callback_query(F.data == "farms")
+async def cb_farms(cq: CallbackQuery):
+    await cq.answer()
+    text, markup = await build_farms_view(cq.from_user.id)
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("hfarm:"))
+async def cb_hfarm(cq: CallbackQuery):
+    fid = int(cq.data.split(":")[1])
+    token = getattr(config, "HIVE_TOKEN", "") or None
+    name = str(fid)
+    if token:
+        try:
+            farms = await hive.fetch_farms(token)
+            name = next((f["name"] for f in farms if f["id"] == fid), str(fid))
+        except Exception:
+            pass
+    on = await db.toggle_hive_farm(cq.from_user.id, fid, name)
+    await cq.answer("Под наблюдением" if on else "Убрано")
+    text, markup = await build_farms_view(cq.from_user.id)
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("hkwh:"))
+async def cb_hkwh(cq: CallbackQuery, state: FSMContext):
+    fid = int(cq.data.split(":")[1])
+    await state.set_state(SetKwh.value)
+    await state.update_data(farm_id=fid)
+    await cq.message.answer("Пришли цену электричества в $/кВт⋅ч (например 0.05). "
+                            "0 — убрать цену.")
+    await cq.answer()
+
+
+@dp.message(SetKwh.value)
+async def setkwh_value(m: Message, state: FSMContext):
+    raw = m.text.strip().replace(",", ".")
+    try:
+        val = float(raw)
+    except ValueError:
+        await m.answer("Нужно число, например 0.05. Или /start чтобы отменить.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    fid = data.get("farm_id")
+    await db.set_hive_kwh(m.from_user.id, fid, None if val <= 0 else val)
+    await m.answer("Цена сохранена ✅" if val > 0 else "Цена убрана")
+    text, markup = await build_farms_view(m.from_user.id)
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "login")
