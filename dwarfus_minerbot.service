@@ -1,0 +1,15 @@
+[Unit]
+Description=Dwarfus GoldenMiner Telegram bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dwarfus_minerbot
+ExecStart=/opt/dwarfus_minerbot/venv/bin/python /opt/dwarfus_minerbot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
