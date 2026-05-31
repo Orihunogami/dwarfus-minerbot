@@ -47,6 +47,14 @@ CREATE INDEX IF NOT EXISTS idx_snap_acc_ts ON snapshots(account_id, captured_at 
 
 -- миграция для уже созданных таблиц: детализация по устройствам (JSON-строка)
 ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS devices_json TEXT;
+
+-- плагинная модель (аддитивно):
+-- какой провайдер обслуживает аккаунт; существующие строки -> goldenminer
+ALTER TABLE accounts  ADD COLUMN IF NOT EXISTS provider_key TEXT NOT NULL DEFAULT 'nockchain.goldenminer';
+-- нормализованные поля снапшота (для будущего общего рендера; старые колонки остаются)
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS headline_json TEXT;
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS workers_json  TEXT;
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS raw_json      TEXT;
 """
 
 
@@ -131,7 +139,7 @@ async def mined_at_day_start(requester_tg_id: int, account_id: int, day_start: i
 async def _internal_all_active_accounts() -> list[asyncpg.Record]:
     async with _pool.acquire() as c:
         return await c.fetch(
-            "SELECT id, tg_id, wallet, password_enc FROM accounts WHERE is_active = TRUE"
+            "SELECT id, tg_id, wallet, password_enc, provider_key FROM accounts WHERE is_active = TRUE"
         )
 
 
@@ -141,11 +149,13 @@ async def _internal_insert_snapshot(account_id: int, s: dict) -> None:
         await c.execute(
             """INSERT INTO snapshots
                (account_id, captured_at, mined, locked, transferable, today_est,
-                local_rate, real_rate, devices_online, devices_json)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                local_rate, real_rate, devices_online, devices_json,
+                headline_json, workers_json, raw_json)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
             account_id, s["captured_at"], s["mined"], s["locked"], s["transferable"],
-            s["today_est"], s["local_rate"], s["real_rate"], s["devices_online"],
+            s["today_est"], s.get("local_rate"), s.get("real_rate"), s.get("devices_online"),
             json.dumps(s.get("devices", [])),
+            s.get("headline_json"), s.get("workers_json"), s.get("raw_json"),
         )
 
 

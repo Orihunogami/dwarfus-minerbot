@@ -221,8 +221,7 @@ async def withdrawals(m: Message):
             continue
         name = r["label"] or (r["wallet"][:10] + "…")
         try:
-            cli = await collector._client_for(acc)
-            txs = await cli.transactions()
+            txs = await collector.withdrawals_for(acc)
         except Exception as e:
             blocks.append(f"💸 <b>{name}</b>\nне удалось получить: {e}")
             continue
