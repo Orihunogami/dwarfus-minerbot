@@ -63,3 +63,24 @@ def accounts_manage(accounts) -> InlineKeyboardMarkup:
 
 def back_to(data: str = "home") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Назад", data)]])
+
+
+def _repo_short(url: str) -> str:
+    return url.rstrip("/").split("/")[-1][:18]
+
+
+def coin_screen(coin_key: str, repos, *, has_suggested: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for r in repos:
+        eye = "👁" if r["watch_enabled"] else "🔕"
+        rows.append([
+            _btn(f"{eye} {_repo_short(r['url'])}", f"wrepo:{r['id']}"),
+            _btn("❌", f"rmrepo:{r['id']}"),
+        ])
+    if has_suggested and not repos:
+        rows.append([_btn("➕ Добавить рекомендованную", f"seedrepo:{coin_key}")])
+    rows.append([_btn("➕ Добавить репу", f"addrepo:{coin_key}")])
+    if repos:
+        rows.append([_btn("🔍 Проверить сейчас", f"chkcoin:{coin_key}")])
+    rows.append([_btn("⬅️ Назад", "home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

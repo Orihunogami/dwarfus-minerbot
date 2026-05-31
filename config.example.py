@@ -18,6 +18,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 # ключ CoinMarketCap для курсов (опционально; нет ключа -> бот работает, но без $)
 CMC_API_KEY = os.environ.get("CMC_API_KEY", "")
 
+# GitHub токен для проверки версий (опционально; без него анонимный лимит ~60/час на IP)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+
+# как часто проверять версии репозиториев, минут
+VERSION_CHECK_MINUTES = int(os.environ.get("VERSION_CHECK_MINUTES", "60"))
+
 # как часто collector опрашивает аккаунты, минут
 POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "10"))
 

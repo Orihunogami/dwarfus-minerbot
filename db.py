@@ -55,6 +55,24 @@ ALTER TABLE accounts  ADD COLUMN IF NOT EXISTS provider_key TEXT NOT NULL DEFAUL
 ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS headline_json TEXT;
 ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS workers_json  TEXT;
 ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS raw_json      TEXT;
+
+-- репозитории под слежение за версиями (per-user, как аккаунты)
+CREATE TABLE IF NOT EXISTS repos (
+    id            BIGSERIAL PRIMARY KEY,
+    tg_id         BIGINT  NOT NULL,
+    coin_key      TEXT    NOT NULL,
+    url           TEXT    NOT NULL,
+    kind          TEXT    NOT NULL DEFAULT 'miner',
+    watch_mode    TEXT    NOT NULL DEFAULT 'auto',
+    watch_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    last_version  TEXT,
+    last_url      TEXT,
+    last_checked  BIGINT,
+    created_at    BIGINT  NOT NULL,
+    UNIQUE (tg_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_repos_tg    ON repos(tg_id);
+CREATE INDEX IF NOT EXISTS idx_repos_watch ON repos(watch_enabled);
 """
 
 
@@ -135,6 +153,62 @@ async def mined_at_day_start(requester_tg_id: int, account_id: int, day_start: i
         )
 
 
+# ---------- репозитории (всегда с tg_id) ----------
+async def add_repo(tg_id: int, coin_key: str, url: str,
+                   kind: str = "miner", watch_mode: str = "auto") -> int:
+    async with _pool.acquire() as c:
+        return await c.fetchval(
+            """INSERT INTO repos (tg_id, coin_key, url, kind, watch_mode, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (tg_id, url)
+               DO UPDATE SET coin_key = EXCLUDED.coin_key, kind = EXCLUDED.kind,
+                             watch_enabled = TRUE
+               RETURNING id""",
+            tg_id, coin_key, url, kind, watch_mode, int(time.time()),
+        )
+
+
+async def list_repos(requester_tg_id: int, coin_key: str) -> list[asyncpg.Record]:
+    async with _pool.acquire() as c:
+        return await c.fetch(
+            "SELECT * FROM repos WHERE tg_id = $1 AND coin_key = $2 ORDER BY created_at",
+            requester_tg_id, coin_key,
+        )
+
+
+async def get_repo(requester_tg_id: int, repo_id: int) -> asyncpg.Record | None:
+    async with _pool.acquire() as c:
+        return await c.fetchrow(
+            "SELECT * FROM repos WHERE id = $1 AND tg_id = $2", repo_id, requester_tg_id
+        )
+
+
+async def delete_repo(requester_tg_id: int, repo_id: int) -> bool:
+    async with _pool.acquire() as c:
+        res = await c.execute(
+            "DELETE FROM repos WHERE id = $1 AND tg_id = $2", repo_id, requester_tg_id
+        )
+        return res.endswith("1")
+
+
+async def set_repo_watch(requester_tg_id: int, repo_id: int, enabled: bool) -> None:
+    async with _pool.acquire() as c:
+        await c.execute(
+            "UPDATE repos SET watch_enabled = $3 WHERE id = $1 AND tg_id = $2",
+            repo_id, requester_tg_id, enabled,
+        )
+
+
+async def set_repo_version(requester_tg_id: int, repo_id: int,
+                           version: str | None, url: str | None, checked_at: int) -> None:
+    async with _pool.acquire() as c:
+        await c.execute(
+            "UPDATE repos SET last_version = $3, last_url = $4, last_checked = $5 "
+            "WHERE id = $1 AND tg_id = $2",
+            repo_id, requester_tg_id, version, url, checked_at,
+        )
+
+
 # ---------- внутренние операции collector (без tg_id, не для пользователя) ----------
 async def _internal_all_active_accounts() -> list[asyncpg.Record]:
     async with _pool.acquire() as c:
@@ -162,3 +236,20 @@ async def _internal_insert_snapshot(account_id: int, s: dict) -> None:
 async def _internal_set_inactive(account_id: int) -> None:
     async with _pool.acquire() as c:
         await c.execute("UPDATE accounts SET is_active = FALSE WHERE id = $1", account_id)
+
+
+async def _internal_all_watched_repos() -> list[asyncpg.Record]:
+    async with _pool.acquire() as c:
+        return await c.fetch(
+            "SELECT id, tg_id, coin_key, url, watch_mode, last_version "
+            "FROM repos WHERE watch_enabled = TRUE"
+        )
+
+
+async def _internal_set_repo_version(repo_id: int, version: str | None,
+                                     url: str | None, checked_at: int) -> None:
+    async with _pool.acquire() as c:
+        await c.execute(
+            "UPDATE repos SET last_version = $2, last_url = $3, last_checked = $4 WHERE id = $1",
+            repo_id, version, url, checked_at,
+        )

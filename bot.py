@@ -32,6 +32,8 @@ import collector
 import keyboards
 import coins
 import prices
+import versions
+import watcher
 from providers import registry
 from goldenminer import GoldenMinerClient, AuthError
 from log_setup import setup_logging
@@ -47,6 +49,10 @@ STALE_SECONDS = 90
 class LoginFlow(StatesGroup):
     wallet = State()
     password = State()
+
+
+class AddRepo(StatesGroup):
+    url = State()
 
 
 # ---------- helpers ----------
@@ -397,27 +403,141 @@ async def cb_logout(cq: CallbackQuery):
     await _safe_edit(cq, text, markup)
 
 
-@dp.callback_query(F.data.startswith("coin:"))
-async def cb_coin(cq: CallbackQuery):
-    coin_key = cq.data.split(":", 1)[1]
+async def build_coin_view(tg_id: int, coin_key: str):
+    """(text, markup) экрана монеты: курс + список реп пользователя с версиями."""
     c = coins.get(coin_key)
     if c is None:
-        await cq.answer("Монета не найдена", show_alert=True)
-        return
-    await cq.answer()
+        return None, None
     usd = await prices.get_price(c)
+    repos = await db.list_repos(tg_id, coin_key)
     lines = [f"📦 <b>{c.name}</b>"]
     if c.price is not None:
         rate = f"${usd:.4f}" if usd is not None else "недоступен"
         lines.append(f"Курс: {rate}  (источник: {c.price.kind})")
-    if c.repos:
-        lines.append("\nРепозитории:")
-        for r in c.repos:
-            lines.append(f" • {r.kind} — {r.url}")
+    lines.append("")
+    if repos:
+        lines.append("Репозитории (👁 — на слежении):")
+        for r in repos:
+            name = r["url"].rstrip("/").split("/")[-1]
+            ver = r["last_version"] or "—"
+            eye = "👁" if r["watch_enabled"] else "🔕"
+            lines.append(f" {eye} <b>{name}</b> ({r['kind']}): {ver}")
     else:
-        lines.append("\nРепозитории не привязаны.")
-    lines.append("\n<i>Управление репами и слежение за версиями — следующим шагом.</i>")
-    await _safe_edit(cq, "\n".join(lines), keyboards.back_to("home"))
+        lines.append("Репозиториев пока нет — добавь кнопкой ниже.")
+    has_suggested = bool(c.repos)
+    return "\n".join(lines), keyboards.coin_screen(coin_key, repos, has_suggested=has_suggested)
+
+
+@dp.callback_query(F.data.startswith("coin:"))
+async def cb_coin(cq: CallbackQuery):
+    coin_key = cq.data.split(":", 1)[1]
+    text, markup = await build_coin_view(cq.from_user.id, coin_key)
+    if text is None:
+        await cq.answer("Монета не найдена", show_alert=True)
+        return
+    await cq.answer()
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("addrepo:"))
+async def cb_addrepo(cq: CallbackQuery, state: FSMContext):
+    coin_key = cq.data.split(":", 1)[1]
+    await state.set_state(AddRepo.url)
+    await state.update_data(coin_key=coin_key)
+    await cq.message.answer("Пришли ссылку на GitHub-репозиторий (https://github.com/owner/repo).")
+    await cq.answer()
+
+
+@dp.message(AddRepo.url)
+async def addrepo_url(m: Message, state: FSMContext):
+    url = m.text.strip()
+    if versions.parse_repo(url) is None:
+        await m.answer("Это не похоже на ссылку GitHub. Пришли вида https://github.com/owner/repo "
+                       "или /start чтобы отменить.")
+        return
+    data = await state.get_data()
+    coin_key = data.get("coin_key")
+    await state.clear()
+
+    kind = "wallet" if "wallet" in url.lower() else "miner"
+    repo_id = await db.add_repo(m.from_user.id, coin_key, url, kind=kind)
+    # фиксируем текущую версию молча, чтобы не прислать «новая версия» сразу после добавления
+    latest = await versions.fetch_latest(url, "auto", getattr(config, "GITHUB_TOKEN", "") or None)
+    if latest and latest.get("version"):
+        await db.set_repo_version(m.from_user.id, repo_id, latest["version"],
+                                  latest.get("url"), int(time.time()))
+    await m.answer("Репозиторий добавлен, слежение включено ✅")
+    text, markup = await build_coin_view(m.from_user.id, coin_key)
+    if text:
+        await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("seedrepo:"))
+async def cb_seedrepo(cq: CallbackQuery):
+    coin_key = cq.data.split(":", 1)[1]
+    c = coins.get(coin_key)
+    if not c or not c.repos:
+        await cq.answer("Нет рекомендованной репы", show_alert=True)
+        return
+    for r in c.repos:
+        rid = await db.add_repo(cq.from_user.id, coin_key, r.url, kind=r.kind, watch_mode=r.watch)
+        latest = await versions.fetch_latest(r.url, r.watch, getattr(config, "GITHUB_TOKEN", "") or None)
+        if latest and latest.get("version"):
+            await db.set_repo_version(cq.from_user.id, rid, latest["version"],
+                                      latest.get("url"), int(time.time()))
+    await cq.answer("Добавлено")
+    text, markup = await build_coin_view(cq.from_user.id, coin_key)
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("wrepo:"))
+async def cb_wrepo(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[1])
+    repo = await db.get_repo(cq.from_user.id, rid)
+    if repo is None:
+        await cq.answer("Репа не найдена", show_alert=True)
+        return
+    await db.set_repo_watch(cq.from_user.id, rid, not repo["watch_enabled"])
+    await cq.answer("Слежение выключено" if repo["watch_enabled"] else "Слежение включено")
+    text, markup = await build_coin_view(cq.from_user.id, repo["coin_key"])
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("rmrepo:"))
+async def cb_rmrepo(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[1])
+    repo = await db.get_repo(cq.from_user.id, rid)
+    if repo is None:
+        await cq.answer("Репа не найдена", show_alert=True)
+        return
+    coin_key = repo["coin_key"]
+    await db.delete_repo(cq.from_user.id, rid)
+    await cq.answer("Удалена")
+    text, markup = await build_coin_view(cq.from_user.id, coin_key)
+    await _safe_edit(cq, text, markup)
+
+
+@dp.callback_query(F.data.startswith("chkcoin:"))
+async def cb_chkcoin(cq: CallbackQuery):
+    coin_key = cq.data.split(":", 1)[1]
+    repos = await db.list_repos(cq.from_user.id, coin_key)
+    if not repos:
+        await cq.answer("Нет реп для проверки", show_alert=True)
+        return
+    await cq.answer("Проверяю…")
+    token = getattr(config, "GITHUB_TOKEN", "") or None
+    lines = ["🔍 <b>Проверка версий</b>"]
+    for r in repos:
+        name = r["url"].rstrip("/").split("/")[-1]
+        latest = await versions.fetch_latest(r["url"], r["watch_mode"], token)
+        if not latest or not latest.get("version"):
+            lines.append(f" • {name}: не удалось проверить")
+            continue
+        ver = latest["version"]
+        mark = " 🆕" if r["last_version"] and ver != r["last_version"] else ""
+        lines.append(f" • {name}: {ver} ({latest.get('kind')}){mark}")
+        await db.set_repo_version(cq.from_user.id, r["id"], ver, latest.get("url"), int(time.time()))
+    await _safe_edit(cq, "\n".join(lines), keyboards.back_to(f"coin:{coin_key}"))
 
 
 @dp.callback_query(F.data == "login")
@@ -444,9 +564,20 @@ async def main():
     )
     # первый сбор почти сразу
     scheduler.add_job(collector.collect_all, "date")
+
+    # слежение за версиями репозиториев
+    vmin = getattr(config, "VERSION_CHECK_MINUTES", 60)
+    scheduler.add_job(
+        watcher.check_all, "interval",
+        minutes=vmin, args=[bot],
+        max_instances=1, coalesce=True,
+    )
+    # первая фиксация версий вскоре после старта (молча запомнит текущие)
+    scheduler.add_job(watcher.check_all, "date", args=[bot])
     scheduler.start()
 
-    log.info("bot + collector запущены (опрос каждые %d мин)", config.POLL_MINUTES)
+    log.info("bot + collector запущены (опрос %d мин, проверка версий %d мин)",
+             config.POLL_MINUTES, vmin)
     try:
         await dp.start_polling(bot)
     finally:
